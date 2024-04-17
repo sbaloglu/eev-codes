@@ -1,0 +1,529 @@
+/*
+***************************************************************************** 
+
+Estonian E-Voting Protocol (EEV-star-last) specification for verifying 
+verifiability properties for the adversary model A9:
+
+- A9 corrupts voters, network, Registration Service, Time Marking Service 
+and Vote Collector:
+
+  - Corrupt voters leak the information on their EID cards.
+  - Corrupt Registration Service leaks its secret signing key.
+  - Corrupt Time Marking Service allows adversary to decide the 
+  time for the timemark.
+  - Corrupt Vote Collector leaks its secret signing key, allows 
+  adversary to decide the challenges for the authentication of 
+  the voters, i.e. the session ids, and the ballot identifiers 
+  for storing the ballots. It also does not perform any check 
+  related to the verification of a ballot. Note that the corrupt 
+  Vote Collector still performs some checks on the ballot since 
+  they will also be checked by the I-Ballot Box Processor.
+
+- Individual verification of the last ballot stored is allowed 
+within the specified timeframe. We model this with an additional
+restriction specified for the rule VerApp_ver.
+
+- We check the following properties:
+
+  - Ballot Integrity (BI),
+  - Individual Verifiability 1 (IV1),
+  - Individual Verifiability 3 (IV3),
+  - Eligibility Verifiability (ELI),  
+  - Result Integrity 1 (RES1), 
+  - Result Integrity 2 (RES2), and
+  - Consistency (ONE), 
+
+where except BI, 
+  
+  - IV1 & IV3 & ELI & RES1 & ONE
+
+correpond to strong E2E verifiability, and
+
+  - IV1 & IV3 & ELI & RES2 & ONE
+  
+correspond to weak E2E verifiability from the paper 
+"Election Verifiability in Receipt-free Voting Protocols" 
+by Baloglu et al.
+
+-----------------------------------------------------------------------------
+
+Verification Results:
+
+- Success: BI, IV1, IV3, ELI, RES1, RES2, ONE: verified
+- Execution Time: 1:31.89s
+- Attacks: -
+- Outcome: Ballot integrity is satisfied.
+           Strong/Weak E2E verifiability is satisfied.
+
+-----------------------------------------------------------------------------
+
+analyzed: eev-star-last-ver-a9.spthy
+
+  processing time: 91.66s
+  
+  Ballot_Integrity (all-traces): verified (23 steps)
+  Individual_Verifiability_1 (all-traces): verified (790 steps)
+  Individual_Verifiability_3 (all-traces): verified (4 steps)
+  Eligibility_Verifiability (all-traces): verified (6 steps)
+  Result_Integrity_1 (all-traces): verified (23 steps)
+  Result_Integrity_2 (all-traces): verified (371 steps)
+  Consistency_One (all-traces): verified (2 steps)
+
+*****************************************************************************
+*/
+
+theory EEV_Star_Last_Verifiability_A9
+begin
+ 
+builtins: asymmetric-encryption, signing, hashing, natural-numbers
+
+functions: enc/3, dec/2, zkp/4, ver/4
+
+equations: dec(enc(m, pk(skE), r), skE) = m,
+           ver(zkp(enc(m, pkE, r), m, r, pkid), enc(m, pkE, r), pkE, pkid) = true
+              
+
+// RA  : Registration Authority
+// EO  : Election Organizer
+// RS  : Registration Service
+// TMS : Time Marking Service
+// VC  : Vote Collector
+// IBBP: I-Ballot Box Processor
+
+
+// SETUP 
+
+
+// In EEV, the voters use their EID card to authenticate 
+// themselves to VC and also to sign their ballots. The 
+// following rule models the creation of an EID card for 
+// each identity and a valid certificate for their public 
+// key recorded in the EID card. 
+
+
+rule RA_EID: //creates an EID per identity 
+  let 
+      pkid = pk(~skid) //public key of the identity
+  in
+    [ In(id), Fr(~skid) ] 
+  --[ OnlyOnce(<id, 'EID'>) ]-> 
+    [ !CertID(id, pkid), !EID(id, pkid, ~skid), Out(<id, pkid>) ]
+
+
+rule EO_key: //generates a key pair for the election
+  let
+      pkE = pk(~skE) //public key of the election
+  in
+    [ Fr(~skE) ] 
+  --[ BB_key(pkE), OnlyOnce('key') ]-> 
+    [ !PkE(pkE), !SkE(~skE), Out(pkE) ]
+
+
+rule E0_cand: //determines candidates for the election
+    [ In(v) ] --[  ]-> [ !Cand(v) ]
+
+
+rule E0_voter: //determines voters eligible to vote
+    [ In(id), !CertID(id, pkid) ] 
+  --[ BB_reg(id) ]-> 
+    [ !Voter(id) ]
+
+
+rule Corrupt_RS_cert: //generates a key pair, gets certified,
+                      //and leaks its secret signing key
+  let
+      pkRS = pk(~skRS) //public key of RS
+  in
+    [ Fr(~skRS) ] 
+  --[ OnlyOnce('RScert') ]-> 
+    [ !CertRS(pkRS), !SkRS(~skRS), Out(<~skRS, pkRS>) ]
+
+
+rule Corrupt_VC_cert: //generates a key pair, gets certified,
+                      //and leaks its secret signing key 
+  let
+      pkVC = pk(~skVC) //public key of VC
+  in
+    [ Fr(~skVC) ] 
+  --[ OnlyOnce('VCcert') ]-> 
+    [ !CertVC(pkVC), !SkVC(~skVC), Out(<~skVC, pkVC>) ]
+
+
+rule Corrupt_Voter_leak: //leaks EID to the adversary
+    [ !Voter(id), !EID(id, pkid, skid) ] 
+  --[ Corr(id) ]-> 
+    [ Out(<id, pkid, skid>) ]
+
+
+// In EEV, time is used to mark the ballot and decide 
+// the last ballot of the voter. It is also used to 
+// start/end the individual verification timeframe 
+// for the voter. The following rules start and stream 
+// the general public time and allow the protocol 
+// parties and voters to use it. Time is modelled 
+// as a counter, incremented by one whenever the rule 
+// Stream_time is executed. 
+
+rule Start_time: //starts time 
+    [ In(%t) ] 
+  --[ OnlyOnce('start'), CurrentTime(%t) ]-> 
+    [ Time(%t), !GetTime(%t) ]
+
+
+rule Stream_time: //streams time
+    [ Time(%t) ] 
+  --[ CurrentTime(%t %+ %1) ]-> 
+    [ Time(%t %+ %1), !GetTime(%t %+ %1) ]
+
+
+restriction CheckTime: //checks whether the time is current
+"
+  All t t1 #i #j #k. CheckTime(t) @i & CurrentTime(t) @j 
+  & CurrentTime(t1) @k & k < i ==> k < j | #k = #j 
+"
+
+
+// The following rule ends the verification timeframe 
+// started at t so that the voters will not be able to 
+// verify their ballot after t+3. 
+
+rule End_ver: //ends timeframe for individual verification
+    [ !GetTime(%t), !GetTime(%t %+ %1 %+ %1 %+ %1) ] 
+  --[ EndVer(%t), OnlyOnce(<%t, 'end'>) ]-> 
+    [  ]
+
+
+// In EEV star, all the sessions started by a voter id are 
+// labelled by a session counter started for that voter.
+// It allows voter to distinguish the sessions for which 
+// the ballots were cast. The following rule models a public 
+// counter. The values generated with this rule are used by 
+// the voters and other parties in the order they were created.  
+
+rule Counter: //starts a public counter
+    [ In(ctr) ] 
+  --[ Counter(ctr), OnlyOnce(ctr) ]-> 
+    [ !SessionCtr(ctr) ]
+
+
+// VOTING
+
+
+// In EEV, the voters use their VoteApp to authenticate 
+// themselves to VC, and if authenticated, to generate a 
+// ballot and submit it to VC. The following rules model 
+// the authentication between Voteapp and VC. The VC 
+// generates a challenge for the voter authentication. 
+// The voter signs the challenge and sends it as a response.
+// If VC verifies the signature, it starts a session
+// identified by the challenge sid. In EEV star, we replace 
+// the challenge with the session counter of the voter and 
+// extend it with the timemark received from TMS for that 
+// counter, i.e. the VC reads the session counter scid, 
+// gets the timemark from TMS and sends <scid, ta> to the 
+// voter as a challenge. 
+
+rule Corrupt_VC_ch: //receives the challenge from the adversary
+  let
+      scid = ctr 
+  in
+    [ In(scid1), !Voter(id), !SessionCtr(ctr), !GetTime(ta) ]
+  --[ CheckTime(ta), TMS_auth(id, scid1, ta), 
+      VoterCtr_auth(id, scid), OnlyOnce(<id, scid, 'auth'>),
+      OnlyOnce(<id, scid1, 'auth'>) ]->
+    [ Challenge(id, scid1, ta), VoterCtr(id, scid), Out(<id, scid1, ta>) ]
+
+
+restriction VC_ch_1: //ensures the consistency of the session counter 
+"
+  All id scid1 scid2 ta1 ta2 #i #j #k #l. Counter(scid1) @i & Counter(scid2) @j 
+  & TMS_auth(id, scid1, ta1) @k & TMS_auth(id, scid2, ta2) @l & i < j ==> k < l 
+"
+
+restriction VC_ch_2: //ensures the validity of the session counter  
+"
+  All id scid ta #i. TMS_auth(id, scid, ta) @i ==> Ex #j. Counter(scid) @j 
+"
+
+
+rule VoteApp_resp: //generates a response by signing the challenge
+  let
+      sa = sign(<scid, ta, 'auth'>, skid)
+  in
+    [ In(<id, scid, ta>), !EID(id, pkid, skid) ]
+  --[  ]->
+    [ Response(id, scid, ta), Out(<id, scid, ta, sa>) ]
+
+
+rule Corrupt_VC_auth: //authenticates the voter without verifying the signature
+    [ In(<id, scid, ta, sa>), Challenge(id, scid, ta), !CertID(id, pkid) ]
+  --[ /*Eq(verify(sa, <scid, ta, 'auth'>, pkid), true)*/ ]->
+    [ Authenticated(id, scid, ta) ] 
+
+
+// The following rule models the generation of a ballot by 
+// the voter using their VoteApp. The ballot is the ciphertext 
+// c of the chosen candidate v with the attached signature s 
+// and zkp p for the knowledge of encryption randomness. The
+// signature is created using the signing key inside the voter's 
+// EID card. Moreover, we label the ballot with a fresh term tv 
+// to distinguish the latest ballot cast by the voter. 
+// The linear fact State in this rule is used to record the 
+// information that is required to form a QR code when the 
+// ballot confirmation is received from VC.  
+
+rule VoteApp_vote: //generates a ballot and sends it to VC
+  let 
+      c = enc(v, pkE, ~r)                   //encryption 
+      s = sign(<c, scid, ta, 'vote'>, skid) //signature 
+      p = zkp(c, v, ~r, pkid)               //zkp 
+      b = <c, s, p>                         //ballot
+  in
+    [ Response(id, scid, ta), VoterCtr(id, scid), 
+      !EID(id, pkid, skid), !Cand(v), !PkE(pkE), Fr(~r), Fr(~tv) ]
+  --[ Vote(id, v), VoteTime(id, v, ~tv), VoteB(id, b), 
+      VoterCtr_vote(id, scid) ]->
+    [ State(id, scid, v, ~r, b, ~tv), Out(<id, scid, b>) ]
+
+
+// The following restriction ensures that if the voter continues 
+// voting in a session, the next session starts afterwards.
+
+restriction VoteApp_vote: //ensures the consistency of the counter
+"
+  All id scid1 scid2 #i #j #k. VoterCtr_auth(id, scid1) @i 
+  & VoterCtr_auth(id, scid2) @j & VoterCtr_vote(id, scid1) @k 
+  & i < j ==> k < j
+"
+
+
+// VC accepts the ballot from the session scid if the voter 
+// is authenticated, and the ballot is valid, i.e. the 
+// ciphertext received has not been stored for another 
+// ballot, the signature of the voter for that ciphertext 
+// is valid, and the attached zkp is verified. Then, VC 
+// gets a timemark for the accepted ballot from TMS, and 
+// starts the TSP protocol to register the ballot, i.e. 
+// it generates a registration request for the ballot by 
+// signing the message <vid, h(b)> and sends it to RS.  
+// Note that the corrupt TMS generates a timemark for any 
+// time t received from the adversary.  
+
+rule Corrupt_VC_accept: //accepts the ballot, stores it with the
+                        //identifier received from the adversary,  
+                        //gets a timemark for the ballot from TMS,
+                        //and registers the ballot to RS 
+  let 
+      b = <c, s, p>                 //ballot structure
+      req = sign(<vid, h(b)>, skVC) //registration request
+  in
+    [ In(<id, scid, b>), In(vid), Authenticated(id, scid, ta), 
+      !CertID(id, pkid), !PkE(pkE), !SkVC(skVC), !GetTime(t) ]
+  --[ Eq(verify(s, <c, scid, ta, 'vote'>, pkid), true), 
+      Eq(ver(p, c, pkE, pkid), true), OnlyOnce(<c, 'accept'>), 
+      /*CheckTime(t),*/ TMS_cast(id, scid, b, t), Accept(id, b) ]->
+    [ Accepted(id, scid, ta, vid, b, t), Out(<vid, h(b), req>) ]
+
+
+restriction VC_accept: //accepts a ballot for a session before
+                       //the next session starts
+"
+  All id scid1 scid2 ta1 ta2 b1 t1 #i #j #k. TMS_auth(id, scid1, ta1) @i 
+  & TMS_auth(id, scid2, ta2) @j & TMS_cast(id, scid1, b1, t1) @k 
+  & i < j ==> k < j
+"
+
+
+rule RS_reg: //registers the ballot creating a registration confirmation
+  let
+      reg = sign(h(<vid, hash>), skRS) //registration confirmation
+  in
+    [ In(<vid, hash, req>), !CertVC(pkVC), !SkRS(skRS) ]
+  --[ Eq(verify(req, <vid, hash>, pkVC), true) ]->
+    [ !Registered(req, reg), Out(reg) ]
+
+
+// VC stores the ballot if the registration confirmation is
+// received from RS within the time interval, i.e. if t is 
+// still current. Then, VC sends the ballot confirmation 
+// <vid, reg> to the VoteApp. The verification timeframe 
+// starts at t for that ballot and ends when the time t
+// reaches to t+3. 
+
+rule VC_store: //stores the ballot with registration confirmation 
+    [ In(reg), !CertRS(pkRS), Accepted(id, scid, ta, vid, b, t) ]
+  --[ Eq(verify(reg, h(<vid, h(b)>), pkRS), true), CheckTime(t), 
+      Store(id, b), OnlyOnce(<id, t, 'store'>) ]->
+    [ !Stored(id, scid, ta, vid, b, t, reg), Out(<scid, vid, reg>) ]
+
+
+restriction VC_store: //stores the ballots in the order 
+                      //they have been accepted
+"
+  All id b1 b2 #i #j #k #l. Accept(id, b1) @i & Accept(id, b2) @j 
+  & Store(id, b1) @k & Store(id, b2) @l & i < j ==> k < l
+"
+
+
+// VoteApp receives the ballot confirmation <vid, reg> from 
+// VC, verifies the registration confirmation reg, and forms 
+// the QR code for the verification of the vote inside the 
+// ballot. The fact !Voted records the session id, the vote 
+// cast by the voter and the QR code (vid, r). To model the 
+// individual verification of a coerced voter, we leak the 
+// QR code.    
+
+rule VoteApp_vid: //verifies the registration confirmation
+                  //and displays a QR code (vid, r) 
+    [ In(<scid, vid, reg>), State(id, scid, v, r, b, tv), !CertRS(pkRS) ]
+  --[ Eq(verify(reg, h(<vid, h(b)>), pkRS), true) ]->
+    [ !Voted(id, scid, v, vid, r, tv), Out(<vid, r>) ]
+ 
+
+// The voters verify their votes using their VerApp. 
+// The VerApp reads the QR code (vid, r), sends vid to 
+// VC, and receives the ballot b stored for that vid, 
+// the registration confirmation reg, and the session 
+// counter scid for which the ballot was cast, if the 
+// verification timeframe has not ended for that ballot, 
+// and the ballot is the last one stored by VC. The 
+// VerApp verifies the validity of the ballot and 
+// the registration confirmation, and then uses the 
+// randomness r in the QR code to retrieve the vote 
+// inside the ballot. It displays the vote retrieved 
+// and the session counter scid. If the vote is the one 
+// the voter cast and the session counter is correct, 
+// the verification is completed. For the verification, 
+// we model the communication between VerApp and VC with 
+// one rule, regarding the messages exchanged during the 
+// communication have not been modified. The voters can 
+// verify their votes at most three times with the same vid.
+// The corrupt VC does not check whether the verification 
+// timeframe has ended or the ballot is the last one stored. 
+
+rule VerApp_ver: //verifies the vote cast with the QR code
+  let 
+      b = <c, s, p>       //ballot structure
+      c1 = enc(v, pkE, r) //encryption of the vote v
+  in
+    [ !Voted(id, scid, v, vid, r, tv), !CertID(id, pkid),
+      !Stored(id, scid, ta, vid, b, t, reg), !PkE(pkE), 
+      !CertRS(pkRS) ]
+  --[ Eq(verify(reg, h(<vid, h(b)>), pkRS), true),
+      Eq(verify(s, <c, scid, ta, 'vote'>, pkid), true),
+      Eq(c, c1), /*CheckVer(t),*/ OnlyOnce(<vid, t>), 
+      /*CheckLast(id, b),*/ Verified(id, v, tv) ]->
+    [  ]
+
+/*
+restriction VerApp_ver_1: //checks whether the timeframe has ended
+"
+  All t #i #j. CheckVer(t) @i & EndVer(t) @j ==> i < j 
+" 
+
+restriction VerApp_ver_2: //checks whether the ballot to be verified is the last 
+"
+  All id b b1 #i #j #k. Store(id, b1) @i & Store(id, b) @j 
+  & CheckLast(id, b) @k & i < k & j < k ==> i < j | #i = #j
+" 
+*/
+
+// TALLY
+
+
+rule IBBP_verify: //verifies each ballot stored by VC, checks 
+                  //whether it has the registration confirmation
+  let 
+      b = <c, s, p> //ballot structure
+  in
+    [ !Voter(id), !CertID(id, pkid), !Stored(id, scid, ta, vid, b, t, reg), 
+      !Registered(req, reg), !PkE(pkE), !CertVC(pkVC), !CertRS(pkRS) ]
+  --[ Eq(verify(s, <c, scid, ta, 'vote'>, pkid), true), 
+      Eq(ver(p, c, pkE, pkid), true),
+      Eq(verify(req, <vid, h(b)>, pkVC), true), 
+      Eq(verify(reg, h(<vid, h(b)>), pkRS), true) ]->
+    [ !IBBPVerified(id, scid, ta, vid, b, t, reg) ]
+
+
+rule IBBP_tally: //selects the last ballot stored for the voter id
+    [ !IBBPVerified(id, scid, ta, vid, b, t, reg) ]
+  --[ BB_tally(id, b), OnlyOnce(<id, 'tally'>) ]->
+    [  ]
+
+
+restriction IBBP_tally: //selects the last ballot stored for the voter id
+"
+  All id b b1 #i #j #k. Store(id, b1) @i & Store(id, b) @j 
+  & BB_tally(id, b) @k ==> i < j | b = b1
+"
+
+
+// OTHER RESTRICTIONS
+
+
+restriction OnlyOnce:
+" 
+  All x #i #j. OnlyOnce(x) @i & OnlyOnce(x) @j ==> #i = #j
+"
+restriction Equality:
+"
+  All x y #i. Eq(x, y) @i ==> x = y
+"
+
+
+// LEMMA TO CHECK BALLOT INTEGRITY
+
+
+lemma Ballot_Integrity:
+"
+  All id b #i. BB_tally(id, b) @i 
+  ==> ( Ex #j. VoteB(id, b) @j ) | ( Ex #j. Corr(id) @j )
+" 
+
+
+// LEMMAS TO CHECK E2E VERIFIABILITY 
+
+
+lemma Individual_Verifiability_1:
+"
+  All id v t c s p pkE #i #j #k. Verified(id, v, t) @i 
+  & BB_tally(id, <c, s, p>) @j & BB_key(pkE) @k
+  & ( All v1 t1 #l1 #l2. VoteTime(id, v1, t1) @l1 & VoteTime(id, v, t) @l2 
+      ==> l1 < l2 | #l1 = #l2 )    
+  ==> ( Ex r. c = enc(v, pkE, r) ) 
+    | ( Ex #l. Corr(id) @l )
+"
+
+lemma Individual_Verifiability_3:
+"
+  All id v t #i. Verified(id, v, t) @i ==> Ex #j. BB_reg(id) @j 
+"
+
+lemma Eligibility_Verifiability:
+"
+  All id b #i. BB_tally(id, b) @i ==> Ex #j. BB_reg(id) @j 
+" 
+
+lemma Result_Integrity_1:
+"
+  All id c s p pkE #i #j. BB_tally(id, <c, s, p>) @i & BB_key(pkE) @j    
+  ==> ( Ex v r #k. Vote(id, v) @k & c = enc(v, pkE, r) )
+    | ( Ex #k. Corr(id) @k )
+" 
+
+lemma Result_Integrity_2:
+"
+  All id c s p pkE #i #j. BB_tally(id, <c, s, p>) @i & BB_key(pkE) @j    
+  ==> ( Ex v r #k. Vote(id, v) @k & c = enc(v, pkE, r) )
+    | ( Ex #k. Corr(id) @k )
+    | not( Ex v t #k. Verified(id, v, t) @k 
+  & ( All v1 t1 #l1 #l2. VoteTime(id, v1, t1) @l1 & VoteTime(id, v, t) @l2 
+      ==> l1 < l2 | #l1 = #l2 ) ) 
+" 
+
+lemma Consistency_One:
+" 
+  All id b b1 #i #j. BB_tally(id, b) @i & BB_tally(id, b1) @j ==> #i = #j  
+"
+
+end

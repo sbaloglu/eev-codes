@@ -1,0 +1,688 @@
+(*
+*****************************************************************************
+
+Estonian E-Voting Protocol (EEV-any) specification for verifying
+receipt-freeness for the adversary model A7:
+
+- A7 corrupts voters, network, and Registration Service:
+  - Corrupt voters leak the information on their EID cards.
+  - Corrupt Registration Service leaks its secret signing key.
+
+- Note that A7 also corrupts Time Marking Service. However,
+we don't explicitly specify a corrupt Time Marking Service
+in this model, since honest Vote Collector verifies the timemarks
+received from Time Marking Service.
+
+- This model allows:
+  - an unbounded number of voters,
+  - revoting, and
+  - individual verification of any ballot within the specified
+  timeframe.
+
+- It applies ballot weeding to ensure that a ballot is stored only
+once in the ballot box.
+
+- In this model, we assume the adversary coerces some honest voters
+to cast the vote vR. Following the coercer, the voter casts the
+vote vR on the right side and sends the respective QR code to the
+adversary via coercer channel. On the left side, the voter pretends
+to follow the coercer, casts the vote vR, sends the respective QR
+code via coercer channel, but revotes, i.e. casts the vote vL,
+afterwards.
+
+- This code verifies ballot integrity.
+
+*****************************************************************************
+
+Verification Results:
+
+- Execution Time: 0.152s
+- Attacks: -
+- Outcome: Ballot integrity is satisfied.
+
+*****************************************************************************
+*)
+
+(*** DECLARATIONS ***)
+
+(*set allowDiffPatterns = true.*)
+
+free pub: channel.
+free privRS: channel [private].
+free coerced: channel [private].
+free coercer: channel.
+
+const H: bitstring. (* label for honest voters *)
+const C: bitstring. (* label for corrupt voters *)
+
+const auth: bitstring. (* label for authentication *)
+const vote: bitstring. (* label for vote *)
+
+(* ELGamal encryption *)
+
+fun pk(bitstring): bitstring.
+fun enc(bitstring, bitstring, bitstring): bitstring.
+
+reduc forall m, skE, r: bitstring;
+      dec(enc(m, pk(skE), r), skE) = m.
+
+(* Digital signature *)
+
+fun sign(bitstring, bitstring): bitstring.
+
+reduc forall m, skid: bitstring;
+      verify(sign(m, skid), m, pk(skid)) = true.
+
+(* Hashing *)
+
+fun h(bitstring): bitstring.
+
+(*** TABLES ***)
+
+table CertRS(bitstring).
+table CertVC(bitstring).
+table CertID(bitstring, bitstring, bitstring).
+table EID(bitstring, bitstring, bitstring).
+table PkE(bitstring).
+table SkE(bitstring).
+table Voter(bitstring, bitstring).
+table Vote(bitstring, bitstring, bitstring, bitstring).
+table Voted(bitstring, bitstring, bitstring, bitstring).
+table VotedforCoerced(bitstring, bitstring, bitstring, bitstring).
+table Registered(bitstring, bitstring).
+table Stored(bitstring, bitstring, bitstring, bitstring, bitstring, bitstring).
+table Ciphertext(bitstring, bitstring).
+table StartVer(bitstring).
+table EndVer(bitstring).
+table Ver(bitstring, bitstring).
+
+(*** EVENTS ***)
+
+event KeyRS(bitstring).
+event KeyVC(bitstring).
+event KeyID(bitstring, bitstring).
+event BBkey(bitstring).
+event Corr(bitstring).
+event TMScast(bitstring, bitstring, bitstring).
+event VoteB(bitstring, bitstring).
+event Verified(bitstring, bitstring).
+event BBtally(bitstring, bitstring).
+event StoreOnce(bitstring, bitstring).
+event TallyOnce(bitstring, bitstring).
+
+(* RESTRICTIONS *)
+
+(* each identity has one signature key pair *)
+restriction id, pkid1, pkid2: bitstring;
+            event(KeyID(id, pkid1)) && event(KeyID(id, pkid2)) ==> pkid1 = pkid2.
+
+(* RS has one signature key pair *)
+restriction pkRS1, pkRS2: bitstring;
+            event(KeyRS(pkRS1)) && event(KeyRS(pkRS2)) ==> pkRS1 = pkRS2.
+
+(* VC has one signature key pair *)
+restriction pkVC1, pkVC2: bitstring;
+            event(KeyVC(pkVC1)) && event(KeyVC(pkVC2)) ==> pkVC1 = pkVC2.
+
+(* there is only one election key *)
+restriction pkE1, pkE2: bitstring;
+            event(BBkey(pkE1)) && event(BBkey(pkE2)) ==> pkE1 = pkE2.
+
+(* any ciphertext c is stored only once (weeding) *)
+restriction c, n1, n2: bitstring;
+            event(StoreOnce(c, n1)) && event(StoreOnce(c, n2)) ==> n1 = n2.
+
+(* only one ballot is tallied for id once *)
+restriction id, n1, n2: bitstring;
+            event(TallyOnce(id, n1)) && event(TallyOnce(id, n2)) ==> n1 = n2.
+
+(*** QUERIES ***)
+
+(* REACHABILITY *)
+(*
+query pkE: bitstring; event(BBkey(pkE)).
+query id: bitstring; event(Corr(id)).
+query id, b, t: bitstring; event(TMScast(id, b, t)).
+query id, b: bitstring; event(VoteB(id, b)).
+query id, v: bitstring; event(Verified(id, v)).
+query id, b: bitstring; event(BBtally(id, b)).
+*)
+
+(* BALLOT INTEGRITY (BI) *)
+
+query id, b: bitstring;
+      event(BBtally(id, b)) ==> event(VoteB(id, b)) || event(Corr(id)).
+
+
+(*** MACROS ***)
+
+(***** Registration Authority (RA) *****)
+
+(* RA creates an EID for identities *)
+let RegisterHonestIdentity =
+  (* generate an id for an honest identity *)
+  new id: bitstring;
+  (* generate a secret signing key for id *)
+ 	new skid: bitstring;
+  (* compute its corresponding public key *)
+ 	let pkid = pk(skid) in
+  (* record id and its public key on KeyID to ensure id has only one public key *)
+  event KeyID(id, pkid);
+  (* record id, its public key and its label on CertID *)
+  insert CertID(id, pkid, H);
+  (* record id's signature key pair on EID *)
+  insert EID(id, pkid, skid);
+  (* send the public information to the public channel, i.e. to the adversary *)
+  out(pub, (id, pkid)).
+
+let RegisterCorruptIdentity =
+  (* receives an identity for a corrupt identity from the public channel *)
+  in(pub, id: bitstring);
+  (* generate a secret signing key for id *)
+ 	new skid: bitstring;
+  (* compute its corresponding public key *)
+ 	let pkid = pk(skid) in
+  (* record id and its public key on KeyID to ensure id has only one public key *)
+  event KeyID(id, pkid);
+  (* record id, its public key and its label on CertID *)
+  insert CertID(id, pkid, C);
+  (* record id's signature key pair on EID *)
+  insert EID(id, pkid, skid);
+  (* send the public information to the public channel, i.e. to the adversary *)
+  out(pub, pkid).
+
+let RegistrationAuthority = ( (!RegisterHonestIdentity) | (!RegisterCorruptIdentity) ).
+
+
+(***** Election Organizer (EO) *****)
+
+(* E0 generates an election key pair for the encryption/decryption of the votes *)
+let GenerateElectionKeyPair =
+  (* generate an election secret key *)
+	new skE: bitstring;
+  (* compute its corresponding public key *)
+	let pkE = pk(skE) in
+  (* record the public key on BB_key to ensure there is only one election key *)
+  event BBkey(pkE);
+  (* record the public key on PkE to share it with protocol parties *)
+	insert PkE(pkE);
+  (* record the secret key on SkE to use it for the decryption of votes *)
+  insert SkE(skE);
+  (* send the public key to the public channel, i.e. to the adversary *)
+  out(pub, pkE).
+
+(* E0 determines the eligible voters who hold valid certificates *)
+let SetupHonestVoter =
+  (* recall id's certificate to ensure id has valid credentials for voting *)
+  get CertID(id, pkid, =H) in
+  (* record id with its label as an eligible voter *)
+	insert Voter(id, H).
+
+let SetupCorruptVoter =
+  (* recall id's certificate to ensure id has valid credentials for voting *)
+  get CertID(id, pkid, =C) in
+  (* record the voter id on Corr *)
+  event Corr(id);
+  (* record id with its label as an eligible voter *)
+	insert Voter(id, C).
+
+(* EO decrypts the ciphertexts received from IBBP and obtains the election result *)
+let DecryptHonestCiphertext =
+  (* get an honest voter id *)
+  get Voter(id, =H) in
+  (* get the honest voter's ciphertext from IBBP *)
+  get Ciphertext(=id, c) in
+  (* get the honest voter's votes recorded on Vote *)
+  get Vote(=id, vL, vR, =c) in
+  (* recall the election secret key *)
+  get SkE(skE) in
+  (* send the vote decrypted to the public channel, i.e. to the adversary *)
+  out(pub, (*choice[dec(c, skE), vL]*)vL).
+
+let DecryptCorruptCiphertext =
+  (* get a corrupt voter id *)
+  get Voter(id, =C) in
+  (* get the corrupt voter's ciphertext from IBBP *)
+  get Ciphertext(=id, c) in
+  (* recall election secret key *)
+  get SkE(skE) in
+  (* send the vote decrypted to the public channel, i.e. to the adversary *)
+  out(pub, dec(c, skE)).
+
+let ElectionOrganizer = ( GenerateElectionKeyPair | (!SetupHonestVoter)
+                        | (!SetupCorruptVoter) | (!DecryptHonestCiphertext)
+                        | (!DecryptCorruptCiphertext) ).
+
+
+(***** Registration Service (RS) *****)
+
+(* RS registers the ballot information coming from VC in its database Registered
+   and sends the ballot confirmation back to VC *)
+let RegisterBallot(skRS: bitstring, pkVC: bitstring) =
+  (* receive a registration request for a ballot *)
+  in(privRS, (vid: bitstring, hash: bitstring, req: bitstring));
+  (* verify the signature on the request *)
+  if verify(req, (vid, hash), pkVC) = true then
+  (* generate a registration confirmation for the request *)
+  let reg = sign(h((vid, hash)), skRS) in
+  (* record the request and confirmation on Registered for the audits *)
+  insert Registered(req, reg);
+  (* send the registration confirmation back *)
+  out(privRS, reg).
+
+let CorruptRegistrationService =
+  (* generate a secret signing key *)
+  new skRS: bitstring;
+  (* leak the secret signing key *)
+  out(pub, skRS);
+  (* compute its corresponding public key *)
+  let pkRS = pk(skRS) in
+  (* record the public key on KeyRS to ensure RS has only one public key *)
+  event KeyRS(pkRS);
+  (* get certified for its public key *)
+  insert CertRS(pkRS);
+  (* get VC's certificate to validate the registration requests *)
+  get CertVC(pkVC) in
+  (!RegisterBallot(skRS, pkVC)).
+
+
+(***** Voters *****)
+
+(* The voters use their VoteApp to cast a ballot into the ballot box kept by VC.
+   First, the voters make a choice, encrypt and sign it, and send the respective
+   ballot to VC using their VoteApp. Then, their VoteApp receives an identifier
+   and registration confirmation for the ballot cast, and forms a QR code for the
+   verification of the vote. QR code is recorded in the table Voted together with
+   the vote cast. *)
+
+(* In the following process, an honest voter is coerced to vote for vR.
+   Therefore, they revote after casting a vote for vR. They share the QR code
+   for the vote vR to convince the coercer. *)
+let CoercedHonestVoterVoteApp(id: bitstring, pkE: bitstring, pkRS: bitstring) =
+  (* get an honest voter id *)
+  get Voter(=id, =H) in
+  (* get id's credentials from EID for signing the ballot *)
+  get EID(=id, pkid, skid) in
+  (* receive the challenge, i.e. the session id, from VC *)
+  in(pub, (=id, sid1: bitstring));
+  (* sign the challenge *)
+  let sa1 = sign((sid1, auth), skid) in
+  (* send the signature as a response to the challenge *)
+  out(pub, (id, sid1, sa1));
+  (* receive the votes to be cast from the adversary *)
+  in(pub, (=id, vL: bitstring, vR: bitstring));
+  (* choose the vote coercer wants *)
+  let v1 = vR in
+  (* generate a randomness for the encryption of the vote *)
+	new r1: bitstring;
+  (* encrypt the vote *)
+	let c1 = enc(v1, pkE, r1) in
+  (* sign the ciphertext *)
+	let s1 = sign((c1, vote), skid) in
+  (* construct the ballot *)
+  let b1 = (c1, s1) in
+  (* record the ballot on VoteB *)
+  event VoteB(id, b1);
+  (* send the ballot within the session sid1 to VC *)
+  out(pub, (id, sid1, b1));
+  (* receive the ballot identifier and registration confirmation from VC *)
+  in(pub, (=sid1, vid1: bitstring, reg1: bitstring));
+  (* verify the registration confirmation *)
+  if verify(reg1, h((vid1, h(b1))), pkRS) = true then
+  (* record the QR code (vid1, r1) on Voted for the verification of the vote *)
+	insert Voted(id, v1, vid1, r1);
+  (* share the QR code with the coercer *)
+  out(coercer, (vid1, r1));
+  (* receive the challenge, i.e. the session id, from VC *)
+  in(coerced, (=id, sid2: bitstring));
+  (* sign the challenge *)
+  let sa2 = sign((sid2, auth), skid) in
+  (* send the signature as a response to the challenge *)
+  out(coerced, (id, sid2, sa2));
+  (* generate a nonce to represent empty *)
+  new empty: bitstring;
+  (* send it to the public channel, i.e. to the adversary *)
+  out(pub, empty);
+  (* the voter casts a vote on the left, but not on the right *)
+  let v2 = (*choice[vL, empty]*)vL in
+  (* generate a randomness for the encryption of the vote on the left *)
+  new rL: bitstring;
+  let r2 = (*choice[rL, empty]*)rL in
+  (* encrypt the vote only on the left *)
+  let cL = enc(vL, pkE, rL) in
+  let c2 = (*choice[cL, empty]*)cL in
+  (* record the votes on Vote to remember them in the tally *)
+  insert Vote(id, vL, vR, c2);
+  (* sign the ciphertext on the left *)
+  let sL = sign((cL, vote), skid) in
+  (* construct the ballots *)
+  let bL = (cL, sL) in
+  let bR = (empty, empty) in
+  let b2 = (*choice[bL, bR]*)bL in
+  (* record the ballot on VoteB *)
+  event VoteB(id, b2);
+  (* send the ballot within the session sid2 to VC *)
+  out(coerced, (id, sid2, b2));
+  (* receive the ballot identifier and registration confirmation from VC *)
+  in(coerced, (=sid2, vid2: bitstring, reg2: bitstring));
+  (* verify the registration confirmation *)
+  if verify(reg2, h((vid2, h(b2))), pkRS) = true then
+  (* record the QR code (vid2, r2) on Voted for the verification of the vote *)
+  insert VotedforCoerced(id, v2, vid2, r2).
+
+let HonestVoterVoteApp(id: bitstring, pkE: bitstring, pkRS: bitstring) =
+  (* get an honest voter id *)
+  get Voter(=id, =H) in
+  (* get id's credentials from EID for signing the ballot *)
+  get EID(=id, pkid, skid) in
+  (* receive the challenge, i.e. the session id, from VC *)
+  in(pub, (=id, sid: bitstring));
+  (* sign the challenge *)
+  let sa = sign((sid, auth), skid) in
+  (* send the signature as a response to the challenge *)
+  out(pub, (id, sid, sa));
+  (* receive the votes to be cast from the adversary *)
+  in(pub, (=id, vL: bitstring, vR: bitstring));
+  (* the voter casts different votes on the left and right *)
+  let v = (*choice[vL, vR]*)vL in
+  (* generate a randomness for the encryption of the vote *)
+	new r: bitstring;
+  (* encrypt the vote *)
+	let c = enc(v, pkE, r) in
+  (* record the votes on Vote to remember them in the tally *)
+  insert Vote(id, vL, vR, c);
+  (* sign the ciphertext *)
+	let s = sign((c, vote), skid) in
+  (* construct the ballot *)
+  let b = (c, s) in
+  (* record the ballot on VoteB *)
+  event VoteB(id, b);
+  (* send the ballot within the session sid to VC *)
+  out(pub, (id, sid, b));
+  (* receive the ballot identifier and registration confirmation from VC *)
+  in(pub, (=sid, vid: bitstring, reg: bitstring));
+  (* verify the registration confirmation *)
+  if verify(reg, h((vid, h(b))), pkRS) = true then
+  (* record the QR code (vid, r) on Voted for the verification of the vote *)
+	insert Voted(id, v, vid, r).
+
+(* A corrupt voter's VoteApp receives a vote, a ciphertext, and a randomness
+   from the adversary. It generates a ballot signing the ciphertext and uses the
+   randomness to form a QR code for the verification of the vote. *)
+let CorruptVoterVoteApp(id: bitstring, pkE: bitstring, pkRS: bitstring) =
+  (* get a corrupt voter id *)
+  get Voter(=id, =C) in
+  (* get id's credentials from EID for signing the ballot *)
+  get EID(=id, pkid, skid) in
+  (* receive the challenge, i.e. the session id, from VC *)
+  in(pub, (=id, sid: bitstring));
+  (* sign the challenge *)
+  let sa = sign((sid, auth), skid) in
+  (* send the signature as a response to the challenge *)
+  out(pub, (id, sid, sa));
+  (* receive a vote, a ciphertext and a randomness from the adversary *)
+  in(pub, (v: bitstring, c: bitstring, r: bitstring));
+  (* sign the ciphertext *)
+	let s = sign((c, vote), skid) in
+  (* construct the ballot *)
+  let b = (c, s) in
+  (* send the ballot within the session sid to VC *)
+  out(pub, (id, sid, b));
+  (* receive the ballot identifier and registration confirmation from VC *)
+  in(pub, (=sid, vid: bitstring, reg: bitstring));
+  (* verify the registration confirmation *)
+  if verify(reg, h((vid, h(b))), pkRS) = true then
+  (* record the QR code (vid, r) on Voted for the verification of the vote *)
+	insert Voted(id, v, vid, r).
+
+(* The following process models the actions of VerApp and VC together
+   for the verification procedure: The table Voted represents the voter's
+   QR code reminding the vote cast for that QR code, whereas the tables
+   Stored and Ver represent the ballot stored with vid in the database
+   of VC, respectively the timeframe for that vid. *)
+let VerApp(pkE: bitstring, pkRS: bitstring) =
+  (* get QR = (vid, r) for id who voted for v *)
+  get Voted(id, v, vid, r) in
+  (* get id's certificate *)
+  get CertID(=id, pkid, x) in
+  (* get id's ballot stored with vid *)
+  get Stored(=id, sid, =vid, (c: bitstring, s: bitstring), t, reg) in
+  (* ballot structure *)
+  let b = (c, s) in
+  (* get vid's verification timeframe *)
+  get Ver(=vid, tVer) in
+  (* check whether vid's verification timeframe has ended *)
+  get EndVer(=tVer) in 0
+  else
+    (* verify the registration confirmation *)
+    if verify(reg, h((vid, h(b))), pkRS) = true then
+    (* verify the voter's signature *)
+    if verify(s, (c, vote), pkid) = true then
+    (* compute the ciphertext using the randomness r in the QR code *)
+    let c1 = enc(v, pkE, r) in
+    (* if c = c1 then *)
+    if c = c1 then
+    (* record Verified for the action of id's verification of v *)
+    event Verified(id, v).
+
+let VerAppforCoerced(pkE: bitstring, pkRS: bitstring) =
+  (* get QR = (vid, r) for id who voted for v *)
+  get VotedforCoerced(id, (*choice[vL, vR]*)vL, (*choice[vidL, vidR]*)vidL, (*choice[rL, rR]*)rL) in
+  (* get id's certificate *)
+  get CertID(=id, pkid, x) in
+  (* get id's ballot stored with vid *)
+  get Stored(=id, sid, (*choice[=vidL, =vidR]*)=vidL, (*choice[(cL: bitstring, sL: bitstring),
+            (cR: bitstring, sR: bitstring)]*)(cL: bitstring, sL: bitstring), t, (*choice[regL, regR]*)regL) in
+  (* ballot structure *)
+  let bL = (cL, sL) in
+  (* get vid's verification timeframe *)
+  get Ver(=vidL, tVer) in
+  (* check whether vid's verification timeframe has ended *)
+  get EndVer(=tVer) in 0
+  else
+    (* verify the registration confirmation *)
+    if verify(regL, h((vidL, h(bL))), pkRS) = true then
+    (* verify the voter's signature *)
+    if verify(sL, (cL, vote), pkid) = true then
+    (* compute the ciphertext using the randomness r in the QR code *)
+    let c1 = enc(vL, pkE, rL) in
+    (* if c = c1 then *)
+    if cL = c1 then
+    (* record Verified for the action of id's verification of v *)
+    event Verified(id, (*choice[vL, vR]*)vL).
+
+let CoercerVerification(pkE: bitstring, pkRS:bitstring) =
+  (* receive a QR code from the coercer channel *)
+  in(coercer, (vid: bitstring, r: bitstring));
+  (* get id's ballot stored with vid *)
+  get Stored(id, sid, =vid, (c: bitstring, s: bitstring), t, reg) in
+  (* ballot structure *)
+  let b = (c, s) in
+  (* get vid's verification timeframe *)
+  get Ver(=vid, tVer) in
+  (* check whether vid's verification timeframe has ended *)
+  get EndVer(=tVer) in 0
+  else
+    (* send ballot to the coercer channel *)
+    out(coercer, b).
+
+let Voters =
+  (* get an eligible voter identity *)
+  get Voter(id, x) in
+  (* get the election public key to encrypt the votes with it *)
+  get PkE(pkE) in
+  (* get RS's certificate to verify the registration confirmation *)
+  get CertRS(pkRS) in
+  ( (!CoercedHonestVoterVoteApp(id, pkE, pkRS)) | (!HonestVoterVoteApp(id, pkE, pkRS))
+  | (!CorruptVoterVoteApp(id, pkE, pkRS)) | (!VerApp(pkE, pkRS))
+  | (!VerAppforCoerced(pkE, pkRS)) | (!CoercerVerification(pkE, pkRS)) ).
+
+
+(***** Vote Collector (VC) *****)
+
+(* VC first authenticates the voter id: generates a challenge labelled with sid,
+   sends it to the voter for the authentication, and verifies the voter response
+   to that challenge. VC then receives a ballot in the session sid, gets a timemark
+   t for the ballot from TMS, registers the ballot to RS, and stores all the ballot
+   information in the table Stored. Finally, it starts the verification timeframe
+   for that ballot identified and sends the ballot registration confirmation back
+   to the voter's VoteApp. *)
+let StoreBallot(skVC: bitstring, pkRS: bitstring) =
+  (* get an eligible voter identity id *)
+  get Voter(id, x) in
+  (* get id's certificate *)
+  get CertID(=id, pkid, =x) in
+  (* generate an authentication challenge for id *)
+  new sid: bitstring;
+  (* send the challenge, i.e. the session id, to the voter *)
+  out(pub, (id, sid));
+  (* receive a response for the challenge *)
+  in(pub, (=id, =sid, sa: bitstring));
+  (* verify the signature and starts the session sid *)
+  if verify(sa, (sid, auth), pkid) = true then
+  (* receive id's ballot for that session *)
+  in(pub, (=id, =sid, (c: bitstring, s: bitstring)));
+  (* generate a nonce to ensure c is stored once *)
+  new n: bitstring;
+  (* record n to restrict the procedure of c *)
+  event StoreOnce(c, n);
+  (* ballot structure *)
+  let b = (c, s) in
+  (* verify the signature *)
+  if verify(s, (c, vote), pkid) = true then
+  (* generate a term to represent the current time *)
+  new t: bitstring;
+  (* get a timemark for id and b from TMS *)
+  event TMScast(id, b, t);
+  (* generate an identifier for the ballot b *)
+  new vid: bitstring;
+  (* generate a registration request for the ballot b *)
+  let req = sign((vid, h(b)), skVC) in
+  (* send the ballot information and registration request to RS *)
+  out(privRS, (vid, h(b), req));
+  (* receive a registration confirmation from RS *)
+  in(privRS, reg: bitstring);
+  (* verify the RS's signature *)
+  if verify(reg, h((vid, h(b))), pkRS) = true then
+  (* record the ballot information on Stored *)
+  insert Stored(id, sid, vid, b, t, reg);
+  (* start verification timeframe for vid *)
+  get StartVer(tVer) in
+  (* record the current time for vid on Ver *)
+  insert Ver(vid, tVer);
+  (* send the identifier and registration confirmation to VoteApp *)
+  out(pub, (sid, vid, reg)).
+
+let StoreBallotforCoerced(skVC: bitstring, pkRS: bitstring) =
+  (* get an eligible voter identity id *)
+  get Voter(id, x) in
+  (* get id's certificate *)
+  get CertID(=id, pkid, =x) in
+  (* generate an authentication challenge for id *)
+  new sid: bitstring;
+  (* send the challenge, i.e. the session id, to the voter *)
+  out(coerced, (id, sid));
+  (* receive a response for the challenge *)
+  in(coerced, (=id, =sid, sa: bitstring));
+  (* verify the signature and starts the session sid *)
+  if verify(sa, (sid, auth), pkid) = true then
+  (* receive id's ballot for that session *)
+  in(coerced, (=id, =sid, (c: bitstring, s: bitstring)));
+  (* generate a nonce to ensure c is stored once *)
+  new n: bitstring;
+  (* record n to restrict the procedure of c *)
+  event StoreOnce(c, n);
+  (* ballot structure *)
+  let b = (c, s) in
+  (* verify the signature *)
+  (*if choice[verify(s, (c, vote), pkid), true] = choice[true, true] then*)
+  if verify(s, (c, vote), pkid) = true then
+  (* generate a term to represent the current time *)
+  new t: bitstring;
+  (* get a timemark for id and b from TMS *)
+  event TMScast(id, b, t);
+  (* generate an identifier for the ballot b *)
+  new vid: bitstring;
+  (* generate a registration request for the ballot b *)
+  let req = sign((vid, h(b)), skVC) in
+  (* send the ballot information and registration request to RS *)
+  out(privRS, (vid, h(b), req));
+  (* receive a registration confirmation from RS *)
+  in(privRS, reg: bitstring);
+  (* verify the RS's signature *)
+  if verify(reg, h((vid, h(b))), pkRS) = true then
+  (* record the ballot information on Stored *)
+  insert Stored(id, sid, vid, b, t, reg);
+  (* start verification timeframe for vid *)
+  get StartVer(tVer) in
+  (* record the current time for vid on Ver *)
+  insert Ver(vid, tVer);
+  (* send the identifier and registration confirmation to VoteApp *)
+  out(coerced, (sid, vid, reg)).
+
+let VoteCollector =
+  (* generate a secret signing key *)
+  new skVC: bitstring;
+  (* compute its corresponding public key *)
+  let pkVC = pk(skVC) in
+  (* record the public key on KeyVC to ensure VC has only one public key *)
+  event KeyVC(pkVC);
+  (* get certified for its public key *)
+  insert CertVC(pkVC);
+  (* get RS's certificate to verify the registration confirmations *)
+  get CertRS(pkRS) in
+  ( (!StoreBallot(skVC, pkRS)) | (!StoreBallotforCoerced(skVC, pkRS)) ).
+
+
+(***** I-Ballot Box Processor (IBBP) *****)
+
+(* IBBP receives the ballots stored by VC, checks whether they were registered
+   in the database of RS, checks the validity of the ballots with respect to
+   their signature, timemark and registration confirmation, then detaches the
+   ciphertexts from the ballots for the decryption. *)
+let IBallotBoxProcessor =
+  (* get the voter's, RS's and VC's certificates *)
+  get CertID(id, pkid, x) in
+  get CertRS(pkRS) in
+  get CertVC(pkVC) in
+  (* get the voter's ballot from Stored *)
+  get Stored(=id, sid, vid, (c: bitstring, s: bitstring), t, reg) in
+  (* get the registration confirmation of the ballot from Registered *)
+  get Registered(req, =reg) in
+  (* ballot structure *)
+  let b = (c, s) in
+  (* verify the voter's signature *)
+  if verify(s, (c, vote), pkid) = true then
+  (* verify the RS's signature *)
+  if verify(reg, h((vid, h(b))), pkRS) = true then
+  (* verify the VC's signature *)
+  if verify(req, (vid, h(b)), pkVC) = true then
+  (* generate a nonce n to ensure the ballot is tallied for voter id once *)
+  new n: bitstring;
+  (* record n to restrict the tally procedure for the voter *)
+  event TallyOnce(id, n);
+  (* record the ballot on BBtally *)
+  event BBtally(id, b);
+  (* store the voter's ciphertext *)
+  insert Ciphertext(id, c).
+
+
+(***** Verification Timeframe *****)
+
+(* The following process starts and ends a public verification timeframe. The
+   timeframe is recorded on the table StartVer to be called by VC when it stores
+   the ballot. It is also recorded on EndVer to be checked when VerApp requests
+   a verification related to a ballot. *)
+let StartVerificationTimeframe =
+  (* get the time information from the public channel *)
+  in(pub, t: bitstring);
+  (* start the verification timeframe *)
+  insert StartVer(t);
+  (* end the verification timeframe *)
+  insert EndVer(t).
+
+(*** MAIN PROCESS ***)
+
+process	 ( RegistrationAuthority | ElectionOrganizer | CorruptRegistrationService
+         | (!Voters) | VoteCollector | (!IBallotBoxProcessor)
+         | (!StartVerificationTimeframe) )
